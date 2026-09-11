@@ -12,6 +12,8 @@ env/
 .env
 
 # ChromaDB / local vector database
+
+backend/chroma_data/
 chroma/
 chromadb/
 *.sqlite
