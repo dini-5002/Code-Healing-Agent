@@ -1,4 +1,4 @@
-# Self-Healing Code — FastAPI + Streamlit + Human Approval
+# Code-Corrector-Agent — FastAPI + Streamlit + Human Approval
 
 A productionized take on NirDiamant's [`self_healing_code.ipynb`](https://github.com/NirDiamant/GenAI_Agents/blob/main/all_agents_tutorials/self_healing_code.ipynb)
 notebook: a LangGraph agent that runs a function, catches its runtime error,
