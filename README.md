@@ -2,7 +2,7 @@
 Readme · MD
 # Code-Healing-Agent — FastAPI + Streamlit + Human Approval
  
-A productionized take on NirDiamant's [`self_healing_code.ipynb`](https://github.com/NirDiamant/GenAI_Agents/blob/main/all_agents_tutorials/self_healing_code.ipynb)
+Based on NirDiamant's [`self_healing_code.ipynb`](https://github.com/NirDiamant/GenAI_Agents/blob/main/all_agents_tutorials/self_healing_code.ipynb)
 notebook: a LangGraph agent that generates test calls for a Python function,
 runs them, and if any fail, asks a Fixer LLM to propose a patch — split into
 a **FastAPI backend** and a **Streamlit frontend**, running on your **local
