@@ -107,7 +107,7 @@ Open the URL Streamlit prints (usually `http://localhost:8501`).
 ## Notes / limitations (this is a demo, not a sandboxed production system)
 
 - The submitted function and every AI-generated patch are `exec()`'d in the
-  backend process. That's the whole point of a *self-healing code* agent, but
+  backend process. That's the whole point of a _self-healing code_ agent, but
   it means you should only run this against trusted input in a trusted
   environment — it is **not** a code sandbox.
 - Run state lives in an in-process LangGraph `MemorySaver` checkpoint, so

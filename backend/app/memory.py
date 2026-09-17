@@ -1,8 +1,5 @@
-"""
-Vector-memory (ChromaDB) helpers for storing / searching / updating
-bug-report patterns, ported from the original notebook.
-"""
 import os
+import uuid
 from functools import lru_cache
 
 import chromadb
@@ -11,35 +8,53 @@ COLLECTION_NAME = "bug-reports"
 
 
 @lru_cache(maxsize=1)
-def get_client() -> chromadb.ClientAPI:
-    persist_dir = os.getenv("CHROMA_PERSIST_DIR", "./chroma_data")
-    os.makedirs(persist_dir, exist_ok=True)
-    return chromadb.PersistentClient(path=persist_dir)
+def get_client():
+    path = os.getenv("CHROMA_PERSIST_DIR", "./chroma_data")
+    os.makedirs(path, exist_ok=True)
+    return chromadb.PersistentClient(path=path)
 
 
 def get_collection():
-    client = get_client()
-    return client.get_or_create_collection(name=COLLECTION_NAME)
+    return get_client().get_or_create_collection(name=COLLECTION_NAME)
 
 
-def list_memories(limit: int = 100):
-    """Return all stored bug-pattern memories (for the frontend 'Memory' tab)."""
-    collection = get_collection()
-    data = collection.get(limit=limit)
-    memories = []
-    for i, mem_id in enumerate(data.get("ids", [])):
-        memories.append(
-            {
-                "id": mem_id,
-                "document": data["documents"][i] if data.get("documents") else "",
-            }
-        )
-    return memories
+def add_memory(document: str) -> None:
+    get_collection().add(ids=[str(uuid.uuid4())], documents=[document])
 
 
-def clear_memories():
-    collection = get_collection()
-    existing = collection.get()
-    ids = existing.get("ids", [])
+def list_memories(limit: int = 100) -> list[dict]:
+    d = get_collection().get(limit=limit)
+    ids = d.get("ids", [])
+    docs = d.get("documents", [])
+    return [{"id": i, "document": docs[n] if n < len(docs) else ""} for n, i in enumerate(ids)]
+
+
+def clear_memories() -> None:
+    c = get_collection()
+    ids = c.get().get("ids", [])
     if ids:
-        collection.delete(ids=ids)
+        c.delete(ids=ids)
+
+
+# ---------------------------------------------------------------------------
+# Best-effort helpers used by the graph. Memory is a convenience for giving
+# the Fixer LLM extra context -- it must never be able to fail or block a run
+# (e.g. Chroma not installed/running), so every call here swallows errors.
+# ---------------------------------------------------------------------------
+def save_bug_pattern(text: str) -> None:
+    try:
+        add_memory(text)
+    except Exception:
+        pass
+
+
+def recent_patterns(query: str, limit: int = 3) -> list[str]:
+    try:
+        collection = get_collection()
+        count = collection.count()
+        if not count:
+            return []
+        results = collection.query(query_texts=[query], n_results=min(limit, count))
+        return results.get("documents", [[]])[0]
+    except Exception:
+        return []

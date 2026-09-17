@@ -1,278 +1,189 @@
-"""
-Streamlit frontend for the Self-Healing Code agent.
-
-Talks to the FastAPI backend over HTTP. The important bit is the
-"Awaiting Approval" panel: whenever a run pauses at the human-approval
-gate, this UI shows the error, the bug report, and the AI's proposed
-patch, and lets a human Approve, Edit-then-Approve, or Reject it.
-"""
+import ast as _ast
 import os
 import time
 
 import requests
 import streamlit as st
+from code_editor import code_editor
 
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
+st.set_page_config(page_title="Self-Healing Code Studio", page_icon="🩹", layout="wide", initial_sidebar_state="expanded")
 
-st.set_page_config(page_title="Self-Healing Code Studio", page_icon="🩹", layout="wide")
+st.markdown("""
+<style>
+.block-container{padding:1.5rem 2.2rem 3rem;max-width:1300px}
+.card{padding:16px 18px;border:1px solid #303b4d;border-radius:16px;background:#111827;height:100%}
+.metric{padding:14px 16px;border:1px solid #303b4d;border-radius:15px;background:#111827}.metric .label{color:#8f9bad;font-size:.78rem}.metric .value{font-size:1.35rem;font-weight:700;margin-top:3px}
+.section-title{font-size:1.05rem;font-weight:700;margin:14px 0 8px}.muted{color:#94a3b8}
+.case-row{padding:8px 12px;border:1px solid #303b4d;border-radius:10px;background:#111827;margin-bottom:6px;font-family:monospace;font-size:.88rem}
+[data-testid="stSidebar"]{border-right:1px solid #253044}
+button[kind="primary"]{font-weight:700}
+</style>
+<h1>🩹 Self-Healing Code Studio</h1>
+""", unsafe_allow_html=True)
 
-
-# --------------------------------------------------------------------------
-# Helpers
-# --------------------------------------------------------------------------
-def api_post(path: str, json: dict | None = None):
-    resp = requests.post(f"{BACKEND_URL}{path}", json=json or {})
-    if not resp.ok:
-        st.error(f"API error ({resp.status_code}): {resp.text}")
-        return None
-    return resp.json()
-
-
-def api_get(path: str):
-    resp = requests.get(f"{BACKEND_URL}{path}")
-    if not resp.ok:
-        st.error(f"API error ({resp.status_code}): {resp.text}")
-        return None
-    return resp.json()
-
-
-def api_delete(path: str):
-    resp = requests.delete(f"{BACKEND_URL}{path}")
-    return resp.ok
+if "active_run" not in st.session_state: st.session_state.active_run = None
+if "source_code" not in st.session_state:
+    st.session_state.source_code = (
+        "def divide_two_numbers(a, b):\n"
+        "    if b == 0:\n"
+        "        raise ZeroDivisionError(\"division by zero\")\n"
+        "    return a / b\n"
+    )
+if "action_pending" not in st.session_state: st.session_state.action_pending = False
 
 
-STATUS_BADGES = {
-    "running": "🔵 running",
-    "awaiting_approval": "🟠 awaiting your approval",
-    "success": "🟢 success",
-    "rejected": "🔴 rejected",
-    "failed_max_iterations": "🟣 gave up (max attempts reached)",
-}
-
-
-def status_badge(status: str) -> str:
-    return STATUS_BADGES.get(status, status)
-
-
-EXAMPLE_FUNCTIONS = {
-    "divide_two_numbers (ZeroDivisionError)": {
-        "code": "def divide_two_numbers(a, b):\n    return a / b\n",
-        "name": "divide_two_numbers",
-        "args": "[10, 0]",
-    },
-    "process_list (IndexError)": {
-        "code": "def process_list(lst, index):\n    return lst[index] * 2\n",
-        "name": "process_list",
-        "args": "[[1, 2, 3], 5]",
-    },
-    "parse_date (ValueError)": {
-        "code": (
-            "def parse_date(date_string):\n"
-            "    year, month, day = date_string.split('-')\n"
-            "    return {'year': int(year), 'month': int(month), 'day': int(day)}\n"
-        ),
-        "name": "parse_date",
-        "args": '["2024/01/01"]',
-    },
-}
-
-
-# --------------------------------------------------------------------------
-# Sidebar
-# --------------------------------------------------------------------------
-with st.sidebar:
-    st.title("🩹 Self-Healing Code")
-    st.caption("FastAPI + LangGraph + Ollama + ChromaDB, with human approval")
-
-    backend_url_input = st.text_input("Backend URL", value=BACKEND_URL)
-    if backend_url_input != BACKEND_URL:
-        BACKEND_URL = backend_url_input
-
-    health = None
+def get(path, timeout=20):
     try:
-        health = api_get("/health")
-    except Exception:
-        pass
+        r = requests.get(BACKEND_URL + path, timeout=timeout)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        st.error(f"Backend error: {e}")
+        return None
+
+
+def post(path, payload=None, timeout=15):
+    try:
+        r = requests.post(BACKEND_URL + path, json=payload if payload is not None else {}, timeout=timeout)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        st.error(f"Backend error: {e}")
+        return None
+
+
+with st.sidebar:
+    st.markdown("## Control Center")
+    health = get("/health", timeout=5)
     if health:
         st.success("Backend connected")
+        st.caption(f"Tester · `{health.get('tester_model','—')}`")
+        st.caption(f"Fixer · `{health.get('fixer_model','—')}`")
     else:
-        st.error("Backend not reachable — is `uvicorn app.main:app` running?")
+        st.error("Backend offline")
+    st.divider()
+    max_iter = st.slider("Repair rounds", 1, 10, 5)
 
-    st.markdown("---")
-    st.caption(
-        "Every AI-generated patch pauses here for human approval "
-        "before it's ever executed. Nothing runs behind your back."
-    )
+st.markdown('<div class="section-title">Source</div>', unsafe_allow_html=True)
+editor = code_editor(
+    st.session_state.source_code,
+    lang="python", theme="monokai", height=280,
+    response_mode=["blur", "debounce"], allow_reset=True,
+    options={"wrap": True, "showLineNumbers": True, "tabSize": 4, "minimap": {"enabled": False}},
+    key="source_editor",
+)
+if editor.get("type") in {"submit", "blur", "debounce"} and editor.get("text") is not None:
+    st.session_state.source_code = editor["text"]
 
-if "active_run_id" not in st.session_state:
-    st.session_state.active_run_id = None
+auto_select = st.checkbox("Let the Tester LLM generate the test cases", value=True)
+args_text, kwargs_text = "[]", "{}"
+if not auto_select:
+    c1, c2 = st.columns(2)
+    args_text = c1.text_input("Positional args", value="[10, 2]")
+    kwargs_text = c2.text_input("Keyword args", value="{}")
 
-tab_run, tab_history, tab_memory = st.tabs(["▶️ Run", "🕘 History", "🧠 Memory"])
+run_button = st.button("🚀 Run & Heal", type="primary", use_container_width=True)
 
-
-# --------------------------------------------------------------------------
-# Run tab
-# --------------------------------------------------------------------------
-with tab_run:
-    st.subheader("Submit a function to run")
-
-    example_choice = st.selectbox(
-        "Start from an example (optional)", ["(blank)"] + list(EXAMPLE_FUNCTIONS.keys())
-    )
-    example = EXAMPLE_FUNCTIONS.get(example_choice, {"code": "", "name": "", "args": "[]"})
-
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        function_code = st.text_area(
-            "Function source code (a single Python function)",
-            value=example["code"],
-            height=180,
-            key=f"code_{example_choice}",
-        )
-    with col2:
-        function_name = st.text_input("Function name", value=example["name"], key=f"name_{example_choice}")
-        arguments_str = st.text_input(
-            "Arguments (JSON list)", value=example["args"], key=f"args_{example_choice}"
-        )
-        max_iterations = st.number_input("Max fix attempts", min_value=1, max_value=20, value=5)
-
-    if st.button("🚀 Run", type="primary"):
-        import json as _json
-
+if run_button:
+    payload = {"function_code": st.session_state.source_code, "max_iterations": max_iter}
+    if not auto_select:
         try:
-            arguments = _json.loads(arguments_str)
+            payload["args"] = _ast.literal_eval(args_text) if args_text.strip() else []
+            payload["kwargs"] = _ast.literal_eval(kwargs_text) if kwargs_text.strip() else {}
         except Exception as e:
-            st.error(f"Arguments must be valid JSON, e.g. [10, 0]. Error: {e}")
-            arguments = None
-
-        if arguments is not None:
-            with st.spinner("Running... this calls your local Ollama model, it may take a moment."):
-                data = api_post(
-                    "/runs",
-                    {
-                        "function_code": function_code,
-                        "function_name": function_name,
-                        "arguments": arguments,
-                        "max_iterations": int(max_iterations),
-                    },
-                )
-            if data:
-                st.session_state.active_run_id = data["run_id"]
-                st.rerun()
-
-    st.markdown("---")
-
-    # ---- Active run panel ----
-    run_id = st.session_state.active_run_id
-    if run_id:
-        run = api_get(f"/runs/{run_id}")
-        if run:
-            st.subheader(f"Run `{run_id[:8]}`")
-            st.markdown(f"**Status:** {status_badge(run['status'])}  |  **Attempts:** {run['iterations']}/{run['max_iterations']}")
-
-            with st.expander("Execution log", expanded=False):
-                for line in run["log"]:
-                    st.text(line)
-
-            if run["status"] == "awaiting_approval":
-                st.warning("⏸️ Paused — a human needs to approve this patch before it runs.")
-
-                st.markdown("**Error**")
-                st.code(run["error_description"], language="text")
-
-                if run["bug_report"]:
-                    with st.expander("🔎 AI-generated bug report"):
-                        st.write(run["bug_report"])
-
-                left, right = st.columns(2)
-                with left:
-                    st.markdown("**Current function**")
-                    st.code(run["function_string"], language="python")
-                with right:
-                    st.markdown("**Proposed patch**")
-                    edited_code = st.text_area(
-                        "You can edit the patch before approving:",
-                        value=run["new_function_string"],
-                        height=220,
-                        key=f"edit_{run_id}_{run['iterations']}",
-                    )
-
-                b1, b2, b3 = st.columns(3)
-                with b1:
-                    if st.button("✅ Approve", type="primary", use_container_width=True):
-                        payload = {}
-                        if edited_code.strip() != run["new_function_string"].strip():
-                            payload["edited_code"] = edited_code
-                        with st.spinner("Applying patch and re-testing..."):
-                            api_post(f"/runs/{run_id}/approve", payload)
-                        st.rerun()
-                with b2:
-                    if st.button("✏️ Approve edited version", use_container_width=True):
-                        with st.spinner("Applying your edited patch..."):
-                            api_post(f"/runs/{run_id}/approve", {"edited_code": edited_code})
-                        st.rerun()
-                with b3:
-                    if st.button("❌ Reject", use_container_width=True):
-                        api_post(f"/runs/{run_id}/reject")
-                        st.rerun()
-
-            elif run["status"] == "success":
-                st.success(f"Fixed and passing. Result: `{run['result']}`")
-                st.markdown("**Final function**")
-                st.code(run["function_string"], language="python")
-
-            elif run["status"] == "rejected":
-                st.error("You rejected this patch. The run stopped without modifying the function.")
-                st.markdown("**Rejected patch**")
-                st.code(run["new_function_string"], language="python")
-
-            elif run["status"] == "failed_max_iterations":
-                st.error(f"Gave up after {run['iterations']} attempt(s) without a passing fix.")
-
-            elif run["status"] == "running":
-                st.info("Still working through the graph...")
-                time.sleep(1)
-                st.rerun()
-
-
-# --------------------------------------------------------------------------
-# History tab
-# --------------------------------------------------------------------------
-with tab_history:
-    st.subheader("Past runs")
-    if st.button("Refresh"):
-        st.rerun()
-    runs = api_get("/runs") or []
-    if not runs:
-        st.info("No runs yet — start one from the Run tab.")
-    for run in runs:
-        with st.container(border=True):
-            c1, c2, c3 = st.columns([2, 2, 1])
-            c1.markdown(f"**{run['function_name']}** — `{run['run_id'][:8]}`")
-            c2.markdown(status_badge(run["status"]))
-            if c3.button("Open", key=f"open_{run['run_id']}"):
-                st.session_state.active_run_id = run["run_id"]
-                st.rerun()
-
-
-# --------------------------------------------------------------------------
-# Memory tab
-# --------------------------------------------------------------------------
-with tab_memory:
-    st.subheader("Vector bug-pattern memory (ChromaDB)")
-    st.caption(
-        "Every bug report gets condensed and stored here. Similar future errors "
-        "are matched against this memory and merged instead of duplicated."
-    )
-    if st.button("🗑️ Clear all memory"):
-        if api_delete("/memory"):
-            st.success("Memory cleared.")
+            st.error(f"Couldn't parse args/kwargs: {e}")
+            payload = None
+    if payload is not None:
+        with st.spinner("Starting the workflow..."):
+            data = post("/runs", payload, timeout=15)
+        if data:
+            st.session_state.active_run = data["run_id"]
             st.rerun()
 
-    memories = api_get("/memory") or []
-    if not memories:
-        st.info("No bug patterns stored yet.")
-    for mem in memories:
-        with st.container(border=True):
-            st.caption(mem["id"])
-            st.write(mem["document"])
+rid = st.session_state.active_run
+if rid:
+    run = get(f"/runs/{rid}")
+    if run:
+        st.divider()
+        st.markdown(f'<div class="section-title">{run["function_name"]}() · <span class="muted">{run["status"]}</span></div>', unsafe_allow_html=True)
+        cols = st.columns(3)
+        metrics = [
+            ("Status", run["status"]),
+            ("Repair rounds", f'{run["iterations"]}/{run["max_iterations"]}'),
+            ("Fixer", run.get("fixer_model", "—")),
+        ]
+        for col, (label, value) in zip(cols, metrics):
+            col.markdown(f'<div class="metric"><div class="label">{label}</div><div class="value">{value}</div></div>', unsafe_allow_html=True)
+
+        st.markdown('<div class="section-title">Test cases</div>', unsafe_allow_html=True)
+        for c in run.get("call_results", []):
+            icon = "✅" if c["passed"] else "❌"
+            badge = {"edge": "🔺 edge", "user": "manual"}.get(c.get("kind"), "typical")
+            call_str = f"{run['function_name']}(*{c['args']}, **{c['kwargs']})"
+            detail = f" — {c['exception']}" if not c["passed"] else ""
+            st.markdown(f'<div class="case-row">{icon} <span class="muted">[{badge}]</span> {call_str}{detail}</div>', unsafe_allow_html=True)
+
+        if run["status"] == "awaiting_approval":
+            st.warning("⏸ Patch ready for review — it has NOT been executed.")
+            left, right = st.columns(2)
+            with left:
+                st.markdown("**Current implementation**")
+                st.code(run["function_string"], language="python")
+            with right:
+                st.markdown("**Proposed Fixer patch**")
+                patch = code_editor(
+                    run["new_function_string"], lang="python", theme="monokai", height=280,
+                    response_mode=["blur", "debounce"], allow_reset=True,
+                    options={"wrap": True, "showLineNumbers": True, "tabSize": 4, "minimap": {"enabled": False}},
+                    key=f"patch_{rid}_{run['iterations']}",
+                )
+                edited = run["new_function_string"]
+                if patch.get("type") in {"submit", "blur", "debounce"} and patch.get("text") is not None:
+                    edited = patch["text"]
+
+            a, b = st.columns(2)
+            approve_clicked = a.button(
+                "✅ Approve Patch", type="primary", use_container_width=True,
+                disabled=st.session_state.action_pending,
+            )
+            reject_clicked = b.button(
+                "❌ Reject Patch", use_container_width=True,
+                disabled=st.session_state.action_pending,
+            )
+            # Both buttons are disabled while a request is in flight, so a
+            # slow approve call can no longer be accidentally followed by
+            # a reject click on the same run.
+            if approve_clicked:
+                st.session_state.action_pending = True
+                with st.spinner("Submitting approval — this can take a while (LLM + re-run)..."):
+                    ok = post(f"/runs/{rid}/approve", {"edited_code": edited}, timeout=120)
+                st.session_state.action_pending = False
+                if ok:
+                    st.rerun()
+            if reject_clicked:
+                st.session_state.action_pending = True
+                with st.spinner("Rejecting patch..."):
+                    ok = post(f"/runs/{rid}/reject", timeout=30)
+                st.session_state.action_pending = False
+                if ok:
+                    st.rerun()
+
+        elif run["status"] == "success":
+            st.success(run["result"] or "All test cases passed.")
+            st.markdown("**Final implementation**")
+            st.code(run["function_string"], language="python")
+        elif run["status"] == "rejected":
+            st.error("Patch rejected. This run is now closed.")
+            st.code(run["new_function_string"] or run["function_string"], language="python")
+        elif run["status"] == "failed_max_iterations":
+            st.error(run["result"] or "Maximum repair rounds reached.")
+        elif run["status"] == "error":
+            st.error(run.get("error_description") or "The background workflow failed.")
+
+        with st.expander("Execution log"):
+            for item in run["log"]: st.write(item)
+
+        if run["status"] == "running":
+            time.sleep(1.2)
+            st.rerun()
